@@ -1,6 +1,6 @@
-# easysurfer-aws
+# EasySurfer AWS
 
-License: MIT
+*License: MIT*
 
 Host a docker FreeSurfer instance on AWS for rapid parallel image segmentation.
 
