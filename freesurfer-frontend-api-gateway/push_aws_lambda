@@ -1,0 +1,3 @@
+#!/bin/bash
+zip -j deploy.zip *.py
+aws lambda update-function-code --function-name='freesurfer-frontend-api-gateway' --zip-file=fileb://deploy.zip &> /dev/null
