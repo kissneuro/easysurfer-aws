@@ -1,0 +1,3 @@
+#!/bin/bash
+zip -j deployment-package.zip *.py
+aws lambda update-function-code --function-name='freesurfer-start-batch' --zip-file=fileb://deployment-package.zip &> /dev/null
