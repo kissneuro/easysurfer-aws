@@ -1,0 +1,127 @@
+#!/bin/bash
+# periodically dump a logfile given as $1 to the given bucket
+
+echo
+echo ================================================================================ 
+echo This here is script logrunner with positional argument 0: $0
+##### echo environment variables:
+echo presenting some environment variables:
+echo -------------------------------------
+echo AWS_BATCH_JOB_ARRAY_INDEX is: $AWS_BATCH_JOB_ARRAY_INDEX
+echo JOB_ID is: $JOB_ID
+echo NIFTI_UUID is: $NIFTI_UUID
+echo LOGGING_INTERVAL is: $LOGGING_INTERVAL
+echo PID_RECON_ALL is: $PID_RECON_ALL
+echo THIS_JOBS_SUBJECTS_DIR is: $THIS_JOBS_SUBJECTS_DIR
+echo SUBJECT_ID is: $SUBJECT_ID
+echo DYNAMODB_REGION is: $DYNAMODB_REGION
+echo DB_NIFTI_TABLE is: $DB_NIFTI_TABLE
+echo FREESURFER_LOG_FILE is: $FREESURFER_LOG_FILE
+echo -------------------------------------
+
+##### check for environment variables
+#if [ -z "${JOB_ID}" ]; then
+	## if not specified, we probably are in DEBUG mode...
+	#echo "no JOB_ID set ..."
+	#echo "DEBUG MODE ENTERED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+	#JOB_ID=444
+	#AWS_BATCH_JOB_ARRAY_INDEX=0
+	#echo "Set JOB_ID to $JOB_ID and AWS_BATCH_JOB_ARRAY_INDEX to $AWS_BATCH_JOB_ARRAY_INDEX, which is child_id in the dynamodb table..."
+#fi
+
+
+##### checking mandatory variables
+if [ -z "$PID_RECON_ALL" ]; then echo "PID_RECON_ALL not set ... exiting" && exit 1; fi
+if [ -z "$NIFTI_UUID" ]; then echo "NIFTI_UUID not set ... exiting" && exit 1; fi
+if [ -z "$FREESURFER_LOG_FILE" ]; then echo "FREESURFER_LOG_FILE not set ... exiting" && exit 1; fi 
+if [ -z "$DYNAMODB_REGION" ]; then echo "DYNAMODB_REGION not set ... exiting" && exit 1; fi
+if [ -z "$DYNAMODB_REGION" ]; then echo "DYNAMODB_REGION not set ... exiting" && exit 1; fi
+if [ -z "$DB_NIFTI_TABLE" ]; then echo "DB_NIFTI_TABLE not set ... exiting" && exit 1; fi
+if [ -z "$LOGGING_INTERVAL" ]; then
+	LOGGING_INTERVAL=40
+	echo "LOGGING_INTERVAL was not set, set to default ${LOGGING_INTERVAL}."
+fi
+
+#### check for existence of jq for building json in bash:
+# see: https://stackoverflow.com/a/677212
+if [ ! command -v jq &> /dev/null ]; then
+	echo "error: program >jq< not found, but needed for building JSON. Exiting..."
+	exit
+fi
+
+#### build database KEY_JSON string:
+# see: https//stackoverflow.com/a/43373675
+KEY_JSON=$(jq -n --arg nifti_uuid "$NIFTI_UUID" '{
+	nifti_uuid: {S: $nifti_uuid}
+}')
+
+################################################################################
+##### start logdumping
+# THESE ARE THE RULES:
+# - we test for FREESURFER_LOG_FILE existence ... if not there, recon-all is not started yet ... so we wait and start the loop again
+# - after that, we test for the PID_RECON_ALL process ... if not existing, recon-all finished ... so we do one last run log run and exit
+# - if recon-all is running, we do business as usual
+
+# NOTE!!!! we treat lines as starting from ONE!!!!
+LINES_ALREADY_READ=0
+LAST_RUN=false
+while :
+do
+
+	# non-literal interpretation needed in if ... so no quotes around true!
+	# check for LAST_RUN and SLEEPING should be here at the top, since on the way there are some 'continue'
+	if [ "$LAST_RUN" = true ]; then echo "LAST_RUN is true, breaking" && break; fi
+	sleep $LOGGING_INTERVAL 
+
+	# does logging file already exist?
+	if [ ! -f "${FREESURFER_LOG_FILE}" ]; then echo "$FREESURFER_LOG_FILE not yet existing..." && continue; fi
+
+	# did the recon-all process quit? if so, this shall be the last run
+	if [ ! -n "$(ps -p $PID_RECON_ALL -o pid=)" ]; then echo "last run detected..." && LAST_RUN=true; fi
+
+  NOW=$(date +%T)
+  echo "reading file $FREESURFER_LOG_FILE at time >$NOW<"
+
+	#### how many log lines are in FREESURFER_LOG_FILE?
+	# continue, if there are zero lines total or no new lines:
+	LINE_COUNT=$(wc -l ${FREESURFER_LOG_FILE} | awk '{print $1}')
+	echo "there are >$LINE_COUNT< lines total in $FREESURFER_LOG_FILE"
+
+	if [ -z "${LINE_COUNT}" ] || [ "${LINE_COUNT}" -eq "0" ]; then echo "line count is zero" && continue; fi
+	if [ "${LINE_COUNT}" -le "${LINES_ALREADY_READ}" ]; then echo "no new lines" && continue; fi
+
+
+	###### --> there are new lines, so write them to database:
+	DIFF=$(expr $LINE_COUNT - $LINES_ALREADY_READ)
+	# see: https://stackoverflow.com/a/14110308
+	# see: https://stackoverflow.com/a/1411024
+	# NOTE: sed works ONE-delimited!!!!
+	NEW_LOG_LINES=$(sed -n "$(expr $LINES_ALREADY_READ + 1),\$p" < "$FREESURFER_LOG_FILE")
+	LINES_ALREADY_READ=$LINE_COUNT
+
+	echo -------------------------
+	echo "writing $DIFF lines from ${FREESURFER_LOG_FILE} to dynamodb database:"
+	echo "key JSON is: $KEY_JSON"
+	VALUES_JSON=$(jq -n --arg log "$NEW_LOG_LINES" '{ 
+		":val1": {
+			L: [ {S: $log} ]
+		}
+	}')
+	echo "values JSON is with head -c 50: $(echo $VALUES_JSON | head -c 50)"
+	echo "values JSON is with tail -c 50: $(echo $VALUES_JSON | tail -c 50)"
+	echo "REGION is: $DYNAMODB_REGION"
+	echo "TABLE_NAME is: $DB_NIFTI_TABLE"
+	echo "calling aws dynamodb update-item ..."
+	aws dynamodb update-item \
+			--region "$DYNAMODB_REGION" \
+			--table-name "$DB_NIFTI_TABLE" \
+			--key "$KEY_JSON" \
+			--update-expression "SET #attr1 = list_append(#attr1, :val1)" \
+			--expression-attribute-names '{"#attr1": "logs"}' \
+			--expression-attribute-values "$VALUES_JSON" \
+			--return-values UPDATED_NEW
+
+done
+
+echo ""
+echo "logrunner process finished"

@@ -1,0 +1,532 @@
+#!/bin/bash -p
+echo ""
+echo "================================================================================"
+echo "This is bash file $0"
+echo "we are in SHELL: $SHELL"
+echo "running >>ls -lh | head -n 10<<:"
+echo "--------------------------------"
+ls -lh | head -n 10
+echo "--------------------------------"
+echo "running >>uname -a<<:"
+uname -a
+echo "running whoami"
+whoami
+echo "running pwd"
+pwd
+echo "... ok, thats enough"
+echo ""
+echo =====================================
+echo ""
+echo ENVIRONMENT VARIABLES list:
+echo ---------------------------------
+echo JOB_ID is: $JOB_ID
+echo LICENSE_S3_KEY is: $LICENSE_S3_KEY
+echo AWS_BATCH_JOB_ARRAY_INDEX is: $AWS_BATCH_JOB_ARRAY_INDEX
+echo MNT_ROOT is: $MNT_ROOT
+echo FREESURFER_HOME is: $FREESURFER_HOME
+echo LOGGING_INTERVAL is: $LOGGING_INTERVAL
+echo SUBJECTS_DIR_ROOT is: $SUBJECTS_DIR_ROOT
+echo LOCAL_FREESURFER_LICENSE_FILE is: $LOCAL_FREESURFER_LICENSE_FILE
+
+##### for debugging when nu_correct not found:
+#echo echoing MNI_INSTALL_DIR: $MNI_INSTALL_DIR
+#echo echoing NO_MINC: $NO_MINC
+#echo echoing MINC_BIN_DIR: $MINC_BIN_DIR
+#echo echoing FS_OVERRIDE: $FS_OVERRIDE
+#echo echoing MNI_DIR: $MNI_DIR
+
+
+
+echo =====================================
+echo "setting some constants..."
+###################### set TABLE and S3 constants
+export DYNAMODB_REGION='eu-central-1' # export for logrunner
+# table names and indexes
+export DB_NIFTI_TABLE='freesurfer-niftis' # export for logrunner
+DB_NIFTI_JOB_UUID_INDEX='job_uuid-index'
+# attributes
+DB_NIFTI_JOB_UUID_ATTR="job_uuid"
+DB_NIFTI_STATUS_ATTR="status"
+DB_NIFTI_S3_PATH_ATTR="s3_key"
+DB_NIFTI_PATH_CLEAN_ATTR="path_clean"
+DB_NIFTI_UUID_ATTR="nifti_uuid"
+DB_NIFTI_NAME_ATTR="name"
+# filter (TODO: should be passed by ENV variable):
+DB_NIFTI_STATUS_FILTER="s3-uploaded"
+
+
+##################### BUCKETS constants
+NIFTI_BUCKET_PATH='nifti-upload'
+FINISHED_BUCKET_PATH='freesurfer-finished'
+LOG_BUCKET_PATH='freesurfer-logs'
+LICENSES_BUCKET_PATH='freesurfer-licenses'
+
+LICENSES_BUCKET_REGION='eu-central-1'
+FINISHED_BUCKET_REGION='eu-central-1'
+LOG_BUCKET_REGION='eu-central-1'
+NIFTI_BUCKET_REGION='eu-central-1'
+
+echo =====================================
+
+if [ -z "${AWS_BATCH_JOB_ARRAY_INDEX}" ]; then
+	echo "AWS_BATCH_JOB_ARRAY_INDEX not set, assuming non-array job... setting it to \"0\" and exporting"
+	export AWS_BATCH_JOB_ARRAY_INDEX="0"
+fi
+
+if [ ! -z "${SUBJECT_ID}" ]; then
+	echo "Apparently, SUBJECT_ID is (!) set. Note that instead of this variable, NIFTI_PATH_CLEAN is used!!!!" \
+		"SUBJECT_ID is ignored!"
+fi
+
+if [ -z "${MNT_ROOT}" ]; then echo "error: MNT_ROOT not set, exiting..." && exit; fi
+if [ -z "${FREESURFER_HOME}" ]; then echo "error: FREESURFER_HOME not set, exiting..." && exit; fi
+if [ -z "${SUBJECTS_DIR_ROOT}" ]; then echo "error: SUBJECTS_DIR_ROOT not set, exiting..." && exit; fi
+if [ -z "${DYNAMODB_REGION}" ]; then echo "error: DYNAMODB_REGION not set, exiting..." && exit; fi
+if [ -z "${DB_NIFTI_TABLE}" ]; then echo "error: DB_NIFTI_TABLE not set, exiting..." && exit; fi
+
+if [ -z "${LOCAL_FREESURFER_LICENSE_FILE}" ] || [ ! -f "${LOCAL_FREESURFER_LICENSE_FILE}" ]; then
+	LOCAL_FREESURFER_LICENSE_FILE="/license_in_container.txt"
+	echo "no license.txt file specified ... set to default >>${LOCAL_FREESURFER_LICENSE_FILE}<<"
+fi
+
+
+################################################################################
+##### doing some checks and set up variables
+echo ""
+echo ================================================================================
+echo "doing some checks..."
+echo "listing FREESURFER_HOME content with command ls -lh ${FREESURFER_HOME} | head -n 5:"
+ls -lh ${FREESURFER_HOME} | head -n 5 
+echo "---------------------------------"
+echo "listing SUBJECTS_DIR_ROOT content with command ls -lh ${SUBJECTS_DIR_ROOT} | head -n 5:"
+ls -lh ${SUBJECTS_DIR_ROOT} | head -n 5 
+echo ---------------------------------
+echo "trying to touch file >>foo<< in >>$SUBJECTS_DIR_ROOT<< and >>ls -lh | head -n 5<<:"
+echo "running pwd"
+pwd
+touch "${SUBJECTS_DIR_ROOT}/foo"
+ls "${SUBJECTS_DIR_ROOT}" -lh | head -n 5
+echo "removing foo and listing again:"
+rm "${SUBJECTS_DIR_ROOT}/foo"
+ls "${SUBJECTS_DIR_ROOT}" -lh | head -n 5
+echo "NOTE !!!! we will create and export variable SUBJECTS_DIR as used by FreeSurfer according to the rule SUBJECTS_DIR_ROOT/JOB_ID:"
+export SUBJECTS_DIR="${SUBJECTS_DIR_ROOT}/${JOB_ID}"
+echo "variable SUBJECTS_DIR is set to >>${SUBJECTS_DIR}<< ... creating folder ${JOB_ID} in ${SUBJECTS_DIR_ROOT}:"
+mkdir "${SUBJECTS_DIR}"
+echo "checking if existing ..."
+if [ -d "${SUBJECTS_DIR}" ]; then echo "...yes"; else echo "...failed ... exiting" && exit; fi
+echo ""
+echo ================================================================================
+echo ""
+echo "sourcing >>${FREESURFER_HOME}/SetUpFreeSurfer.sh<< with a dot command:"
+echo ---------------------------------
+. "${FREESURFER_HOME}/SetUpFreeSurfer.sh"
+echo ---------------------------------
+echo "as a check, running >>which<< on some programs:"
+echo "which bash is: $(which bash)"
+echo "which recon-all is: $(which recon-all)"
+echo "which nu_correct is (a file in freesurfer/mni/bin) is: $(which nu_correct)"
+echo "which aws is: $(which aws)"
+echo "which zip is: $(which zip)"
+echo "which bzip2 is: $(which bzip2)"
+echo "which tar is: $(which tar)"
+echo "echoing current PATH: ${PATH}"
+##### needed by FSL:
+echo ""
+echo exporting variables LANG, LC_ALL and FSLOUTPUTTYPE...
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+export FSLOUTPUTTYPE=NIFTI_GZ
+
+
+
+
+
+
+
+
+################################################################################
+########## FUNCTIONS DEFINITIONS
+##### add to logs[] in dynamodb nifti table
+function dynamodb_add_to_logs() {
+	echo "in dynamodb_add_to_logs() ... calling aws dynamodb update-item on nifti ${NIFTI_UUID}..."
+	KEY_JSON=$(jq -n --arg nifti_uuid "$NIFTI_UUID" '{
+		nifti_uuid: {S: $nifti_uuid}
+	}')
+	
+	LOG_MSG="[easysurfer] ${1}"
+	VALUES_JSON=$(jq -n --arg log "${LOG_MSG}" '{ 
+		":val1": {
+			L: [ {S: $log} ]
+		},
+    ":empty_list": {
+        L: []
+    }
+	}')
+	aws dynamodb update-item \
+			--region "$DYNAMODB_REGION" \
+			--table-name "$DB_NIFTI_TABLE" \
+			--key "$KEY_JSON" \
+			--update-expression "SET #attr1 = list_append(if_not_exists(#attr1, :empty_list), :val1)" \
+			--expression-attribute-names '{"#attr1": "logs"}' \
+			--expression-attribute-values "$VALUES_JSON" \
+			--return-values UPDATED_NEW
+	echo "... aws dynamodb update-item finished"
+}
+
+
+
+dynamodb_add_to_logs "preparing recon-all calculation ..."
+
+
+################################################################################
+##### Go into Bash and do NOT run recon-all?
+if [ -n "${GO_INTO_BASH}" ]; then
+	echo ""
+	echo "================================================================================"
+	echo "GO_INTO_BASH is set, so recon-all will not be executed... exiting..."
+	exit
+fi
+
+
+echo ""
+echo ================================================================================
+echo "Getting NIFTI s3_object_key by querying dynamodb with JOB_ID and AWS_BATCH_JOB_ARRAY_INDEX"
+
+
+
+#################################################################################
+##### A) get NIFTI S3 bucket path (=NIFTI_S3_PATH) from dynamodb database
+# prepare dynamodb query parameters
+KEY_CONDITION_EXPRESSION="#k0 = :v0"
+FILTER_EXPRESSION='#f0 = :v1'
+PROJECTION_EXPRESSION="#p0, #p1, #p2, #p3"
+EXPRESSION_ATTRIBUTE_NAMES_JSON=$(jq -n \
+--arg job_uuid "$DB_NIFTI_JOB_UUID_ATTR" \
+--arg status "$DB_NIFTI_STATUS_ATTR" \
+--arg nifti_uuid "$DB_NIFTI_UUID_ATTR" \
+--arg name "$DB_NIFTI_NAME_ATTR" \
+--arg s3_path "$DB_NIFTI_S3_PATH_ATTR" \
+--arg path_clean "$DB_NIFTI_PATH_CLEAN_ATTR" '{
+		"#k0": $job_uuid,
+		"#f0": $status,
+		"#p0": $nifti_uuid,
+		"#p1": $name,
+		"#p2": $s3_path,
+		"#p3": $path_clean,
+}')
+EXPRESSION_ATTRIBUTE_VALUES_JSON=$(jq -n \
+	--arg job_uuid "$JOB_ID" \
+	--arg status_filter "$DB_NIFTI_STATUS_FILTER" \
+	'{
+		":v0": { S: $job_uuid },
+		":v1": { S: $status_filter }
+	}')
+
+
+# echo the query string - this is just for debug
+echo "doing query >>aws dynamodb query<< with parameters: \
+--region $DYNAMODB_REGION
+--table-name $DB_NIFTI_TABLE
+--index-name $DB_NIFTI_JOB_UUID_INDEX
+--projection-expression $PROJECTION_EXPRESSION
+--key-condition-expression $KEY_CONDITION_EXPRESSION
+--expression-attribute-names $EXPRESSION_ATTRIBUTE_NAMES_JSON
+--expression-attribute-values $EXPRESSION_ATTRIBUTE_VALUES_JSON"
+
+# call the query with aws dynamodb:
+RES=$(aws dynamodb query \
+	--region "$DYNAMODB_REGION" \
+	--table-name "$DB_NIFTI_TABLE" \
+	--index-name "$DB_NIFTI_JOB_UUID_INDEX" \
+	--key-condition-expression "$KEY_CONDITION_EXPRESSION" \
+	--filter-expression "$FILTER_EXPRESSION" \
+	--projection-expression "$PROJECTION_EXPRESSION" \
+	--expression-attribute-names "$EXPRESSION_ATTRIBUTE_NAMES_JSON" \
+	--expression-attribute-values "$EXPRESSION_ATTRIBUTE_VALUES_JSON")
+
+# we get back all the niftis - choose just the one according to this container
+export NIFTI_UUID=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${DB_NIFTI_UUID_ATTR}.S") # export for logrunner
+NIFTI_NAME=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${DB_NIFTI_NAME_ATTR}.S")
+NIFTI_PATH_CLEAN=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${DB_NIFTI_PATH_CLEAN_ATTR}.S")
+NIFTI_S3_PATH=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${DB_NIFTI_S3_PATH_ATTR}.S")
+SUBJECT_ID="${NIFTI_PATH_CLEAN}"
+
+# output the results - this is just for debug purposes
+echo "GOT DATA: "\
+	"NIFTI_UUID is: $NIFTI_UUID, "\
+	"NIFTI_NAME is: $NIFTI_NAME, "\
+	"NIFTI_PATH_CLEAN is: $NIFTI_PATH_CLEAN, "\
+	"NIFTI_S3_PATH is: $NIFTI_S3_PATH"
+echo "NOTE: set SUBJECT_ID variable to NIFTI_PATH_CLEAN, since it unambiguously identifies the subject!"
+
+
+
+##### B) pull that nifti from bucket:
+NIFTI_SAVE_FOLDER="nifti_save"
+mkdir "${NIFTI_SAVE_FOLDER}"
+if [ -d "${NIFTI_SAVE_FOLDER}" ]; then
+	echo "NIFTI_SAVE_FOLDER >${NIFTI_SAVE_FOLDER}< created successfully"
+else
+	echo "NIFTI_SAVE_FOLDER >${NIFTI_SAVE_FOLDER}< could not be created, exiting..." && exit
+fi
+if [ -z "${NIFTI_BUCKET_PATH}" ]; then echo "NIFTI_BUCKET_PATH missing ... exiting" && exit; fi
+echo "Pulling this child's nifti with s3 path "\
+	"NIFTI_S3_PATH >>${NIFTI_S3_PATH}<< in bucket "\
+	"NIFTI_BUCKET_PATH >>${NIFTI_BUCKET_PATH}<< in region "\
+	"NIFTI_BUCKET_REGION >>${NIFTI_BUCKET_REGION}<< to "\
+	"NIFTI_PATH_CLEAN >>${NIFTI_PATH_CLEAN}<< in "\
+	"NIFTI_SAVE_FOLDER >>${NIFTI_SAVE_FOLDER}<<..."
+
+FULL_S3_URI="s3://${NIFTI_BUCKET_PATH}/${NIFTI_S3_PATH}"
+LOCAL_NIFTI_PATH="${NIFTI_SAVE_FOLDER}/${NIFTI_NAME}"
+echo "FULL_S3_URI is: ${FULL_S3_URI}"
+echo "LOCAL_NIFTI_PATH is: ${LOCAL_NIFTI_PATH}"
+aws s3 cp "${FULL_S3_URI}" "${LOCAL_NIFTI_PATH}" --region "${NIFTI_BUCKET_REGION}"
+echo "...testing if LOCAL_NIFTI_PATH exists..."
+if [ -f "${LOCAL_NIFTI_PATH}" ]; then echo "...yes"; else echo "...no... exiting" && exit; fi
+echo "...outputting some of the NIFTI file with hexdump -C LOCAL_NIFTI_PATH | head -c 1000":
+hexdump -C "${LOCAL_NIFTI_PATH}" | head -c 1000
+
+# echo ---------------------------------
+# 
+# 
+# ### PROBLEM: /fs_mnt is readonly! we can't store license.txt there!!!
+# echo pulling license.txt from neurocalculator.de to ${FREESURFER_HOME}:
+# wget neurocalculator.de/aws_storage/license.txt
+# echo ... copying to ${FREESURFER_HOME}/license.txt:
+# cp license.txt ${FREESURFER_HOME}/license.txt
+# 
+# 
+
+
+# 
+# ##### NIFTI_FILE
+# if [ -f "$NIFTI_FILE" ]; then
+# 	echo "... yes ... outputting first 1000 characters of it: NOT DOING IT"
+# 	echo "... but the file command outputs: $(file $NIFTI_FILE)"
+# 	# the cat command can cause output problems when not filtered for special characters!!!
+# 	#cat $NIFTI_FILE | head -c 1000
+# else
+# 	echo "... no -> exiting"
+# 	exit
+# fi
+# 
+
+
+
+################################################################################
+##### Prepare logrunner script
+echo ""
+echo ================================================================================ 
+if [ -z "$LOGRUNNER_SCRIPT" ]; then
+	LOGRUNNER_SCRIPT="logrunner"
+	echo "LOGRUNNER_SCRIPT was not set, set to default >>${LOGRUNNER_SCRIPT}<<"
+fi
+
+#echo "checking if >>${LOGRUNNER_SCRIPT}<< exists. If not, fetching it..."
+#if [ ! -f "${LOGRUNNER_SCRIPT}" ]; then
+#echo ">>${LOGRUNNER_SCRIPT}<< does not exist as a file, trying to fetch it..."
+
+if [ -z "${FETCH_BASE_URL}" ]; then
+	FETCH_BASE_URL="neurocalculator.de/aws_storage"
+	echo "FETCH_BASE_URL was not set, set to default >>${FETCH_BASE_URL}<<"
+fi
+
+wget "${FETCH_BASE_URL}/${LOGRUNNER_SCRIPT}"
+
+if [ -f "${LOGRUNNER_SCRIPT}" ]; then
+	echo "... fetch successful."
+else
+	echo "after fetch, ${LOGRUNNER_SCRIPT} was not found, exiting..."
+	exit
+fi
+
+echo "making ${LOGRUNNER_SCRIPT} executable..."
+chmod +x ${LOGRUNNER_SCRIPT}
+
+
+
+
+
+#### define FREESURFER_LOG_FILE, which is the file the logrunner is watching!!!
+# - could be subject-id/scripts/recon-all.log (~800 KB)
+# - could be subject-id/scripts/recon-all-status.log (~16 KB)
+# - could be screen output by freesurfer, which is basically the same as recon-all.log
+# ==> we dont use the FreeSurfer screen output anymore. Why?
+# ... on the one hand, too much is going on
+# ... on the other hand, dynamodb only accepts 400 KB but a normal recon-all output is round 800 KB
+# ... --> so we use in subject_id/scripts/recon-all-status.log, if not other specified
+export THIS_SUBJECT_PATH="${SUBJECTS_DIR}/${SUBJECT_ID}"
+echo "THIS_SUBJECT_PATH was set to ${THIS_SUBJECT_PATH} and exported for logrunner (TODO)"
+export FREESURFER_LOG_FILE="${THIS_SUBJECT_PATH}/scripts/recon-all-status.log"
+echo "FREESURFER_LOG_FILE was set to default >>${FREESURFER_LOG_FILE}<< and exported"
+
+
+################################################################################
+##### Prepare license.txt file (needed by freesurfer)
+# - a symbolic soft link named license.txt located in FREESURFER_HOME to "/license_in_container.txt" is already created.
+# - this symbolic link is the same for each job and child
+# - now create the file this symbolic link points to
+echo ""
+echo "--------------------------------------"
+echo "TODO: check if file license.txt in FREESURFER_HOME is a symbolic link"
+echo "... if yes, lets take our own!"
+echo "-------------------------------------_"
+#wget "${FETCH_BASE_URL}/license.txt"
+#mv license.txt /license_in_container.txt
+echo "pulling license.txt file from bucket:"
+aws s3 cp s3://${LICENSES_BUCKET_PATH}/${LICENSE_S3_KEY} ${LOCAL_FREESURFER_LICENSE_FILE} --region ${LICENSES_BUCKET_REGION}
+echo "catting /license_in_container.txt"
+cat "/license_in_container.txt"
+echo "pwd is"
+pwd
+echo "ls -lh is"
+ls -lh
+echo "-------------------------------------_"
+
+
+
+################################################################################
+##### start recon-all and output STDOUT and STDERR to LOGDUMP_FILE:
+# see: https://surfer.nmr.mgh.harvard.edu/fswiki/recon-all
+echo ""
+echo ================================================================================
+echo "running recon-all with parameters "\
+	"-s = SUBJECT_ID >>${SUBJECT_ID}<<, "\
+	"-i = LOCAL_NIFTI_PATH >>${LOCAL_NIFTI_PATH}<<"
+echo "... with switches -all, -qcache"
+echo "... and CURRENTLY NOT logging screen output!!!"
+#### NOTE: we dont use the screen output of freesurfer anymore ... it is too much data
+# and for observing what is going on, data in subject_id/scripts/recon-all-status.log is enough.
+# As a consequence, we dont need to redirect the output!
+#recon-all -s $SUBJECT_ID -i $NIFTI_FILE -all -qcache > $FREESURFER_LOG_FILE 2>&1 &
+recon-all -s "${SUBJECT_ID}" -i "${LOCAL_NIFTI_PATH}" -all > /dev/null 2>&1 &
+export PID_RECON_ALL=$!
+START=$SECONDS
+echo "... >>recon-all<< has PID $PID_RECON_ALL, which was exported as PID_RECON_ALL for logrunner. START is $START."
+dynamodb_add_to_logs "recon-all successfully started with file ${LOCAL_NIFTI_PATH}"
+
+
+################################################################################
+##### start logrunner
+# - $LOGRUNNER_LOG_FILE is the status file of the logrunner process - this file does
+#  	not contain any FreeSurfer log!
+# - $LOGRUNNER_SCRIPT needs for logging the following environment variables:
+# 	mandatory:
+#			- JOB_ID, AWS_BATCH_JOB_ARRAY_INDEX
+#			- FREESURFER_LOG_FILE or (SUBJECTS_DIR and SUBJECT_ID)
+# 	optional: 
+#			- LOGGING_INTERVAL
+echo ""
+echo "================================================================================"
+echo "preparing LOGRUNNER script"
+if [ -z $LOGRUNNER_LOG_FILE ]; then
+	LOGRUNNER_LOG_FILE="${SUBJECTS_DIR}/${SUBJECT_ID}_logrunner.log"
+	echo "LOGRUNNER_LOG_FILE was not set, set to default $LOGRUNNER_LOG_FILE"
+fi
+echo "running >>$LOGRUNNER_SCRIPT<< in background, outputting to $LOGRUNNER_LOG_FILE"
+#./"$LOGRUNNER_SCRIPT"
+./"${LOGRUNNER_SCRIPT}" > "${LOGRUNNER_LOG_FILE}" 2>&1 &
+PID_LOGRUNNER=$!
+echo "... >>${LOGRUNNER_SCRIPT}<< has PID $PID_LOGRUNNER."
+
+
+
+################################################################################
+##### wait recon-all to finish
+echo ""
+echo ================================================================================
+echo "waiting PID of >recon-all< which is $PID_RECON_ALL to finish..."
+wait $PID_RECON_ALL
+TIME_PASSED=$((SECONDS - START))
+echo "waiting for PID_RECON_ALL finished --> recon-all has ended after ${TIME_PASSED} seconds."
+
+echo "waiting >logrunner< with PID ${PID_RECON_ALL} to finish, which is waiting for recon-all itself"
+wait $PID_LOGRUNNER
+echo "waiting for PID_LOGRUNNER finished --> logrunner has ended."
+dynamodb_add_to_logs "recon-all has ended" # not before here, otherwise it may get logged before logrunner has finished its last log entry
+
+echo "catting recon-all log file ${FREESURFER_LOG_FILE} with | tail -n 10:"
+cat "${FREESURFER_LOG_FILE}" | tail -n 10
+
+
+echo ""
+echo ================================================================================ 
+echo "... dumping ..."
+echo "	A) complete file ${FREESURFER_LOG_FILE} and then "
+echo "	B) recon-all.log"
+echo ""
+echo ""
+echo ================================================================================ 
+cat "${FREESURFER_LOG_FILE}"
+echo ================================================================================ 
+echo ""
+echo ""
+echo output of recon-all-status.log finished, now NOT outputting recon-all.log...
+echo ================================================================================ 
+#cat "${SUBJECTS_DIR}/${SUBJECT_ID}/scripts/recon-all.log"
+echo ================================================================================ 
+
+
+echo output of recon-all.log finished.
+echo NOT exiting...
+#exit
+
+dynamodb_add_to_logs "zipping output directory..."
+
+
+
+##echo running logdumper...
+###./logdumper ${logdump_file} > logdumper.log 2>&1 &
+##./logdumper ${logdump_file}
+##PID_LOGDUMPER=$!
+##echo ... logdumper has PID ${PID_LOGDUMPER}.
+##echo waiting ${PID_DUMMY} to finish...
+##wait ${PID_DUMMY}
+##TIME_PASSED=$((SECONDS - START))
+##echo Dummy process has ended. Calculation has finished after ${TIME_PASSED} seconds.
+##echo "##########################################################################"
+
+
+##########################################################################################
+##########################################################################################
+##########################################################################################
+##########################################################################################
+
+
+
+
+##########################################################################################
+##### ZIP output file and put file into bucket:
+##########################################################################################
+# NOTE: buckets don't know folders, so we can just use a folder structure as a file name.
+# using zip: with -P a password can be passed by command line (contrary to -e)
+# usage: zip -9 -r -P sdfsadsfsadfsd zipped.zip test_zipdir
+# ... this has to be adjusted when using freesurfer. For now, we just use a zip file:
+ZIP_FILE_NAME="${SUBJECT_ID}.zip"
+echo "Zipping content of folder >${THIS_SUBJECT_PATH}< into file >${ZIP_FILE_NAME}<"
+zip -9 -r ${ZIP_FILE_NAME} ${THIS_SUBJECT_PATH}
+cd -
+echo "Uploading ${ZIP_FILE_NAME} to bucket >${FINISHED_BUCKET_PATH}<"
+aws s3 cp ${ZIP_FILE_NAME} s3://${FINISHED_BUCKET_PATH}/${JOB_ID}/${ZIP_FILE_NAME} --region ${FINISHED_BUCKET_REGION}
+echo "------------------------------------------------------------------"
+echo "copying final version of log file >${FREESURFER_LOG_FILE}< to bucket >${LOG_BUCKET_PATH}<"
+aws s3 cp ${FREESURFER_LOG_FILE} s3://${LOG_BUCKET_PATH}/${JOB_ID}/${SUBJECT_ID}.log --region ${LOG_BUCKET_REGION}
+echo "attempting to kill logdumper with PID ${PID_LOGDUMPER}"
+kill ${PID_LOGDUMPER}
+
+
+echo "------------------------------------------------------------------"
+echo "------------------------------------------------------------------"
+echo "------------------------------------------------------------------"
+echo "------------------------------------------------------------------"
+echo "------------------------------------------------------------------"
+echo "finished all... bye bye"
+echo ""
+echo ""
+echo ""
+echo ""
+echo ""
+echo ""
+echo ""

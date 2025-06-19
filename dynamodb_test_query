@@ -1,0 +1,82 @@
+#!/bin/bash
+JOB_UUID=$1
+
+
+DYNAMODB_REGION=${ENV_REGION}
+DYNAMODB_TABLE="freesurfer-niftis"
+AWS_BATCH_JOB_ARRAY_INDEX=3
+
+
+
+S3_PATH_ATTRIBUTE="s3_key"
+PATH_CLEAN_ATTRIBUTE="path_clean"
+NIFTI_UUID_ATTRIBUTE="nifti_uuid"
+NAME_ATTRIBUTE="name"
+JOB_UUID_ATTRIBUTE="job_uuid"
+STATUS_ATTRIBUTE="status"
+JOB_UUID_INDEX="job_uuid-index"
+STATUS_FILTER="s3-uploaded"
+
+# prepare dynamodb query parameters
+KEY_CONDITION_EXPRESSION="#k0 = :v0"
+FILTER_EXPRESSION='#f0 = :v1'
+PROJECTION_EXPRESSION="#p0, #p1, #p2, #p3"
+EXPRESSION_ATTRIBUTE_NAMES_JSON=$(jq -n \
+--arg job_uuid "$JOB_UUID_ATTRIBUTE" \
+--arg status "$STATUS_ATTRIBUTE" \
+--arg nifti_uuid "$NIFTI_UUID_ATTRIBUTE" \
+--arg name "$NAME_ATTRIBUTE" \
+--arg s3_path "$S3_PATH_ATTRIBUTE" \
+--arg path_clean "$PATH_CLEAN_ATTRIBUTE" '{
+		"#k0": $job_uuid,
+		"#f0": $status,
+		"#p0": $nifti_uuid,
+		"#p1": $name,
+		"#p2": $s3_path,
+		"#p3": $path_clean,
+}')
+EXPRESSION_ATTRIBUTE_VALUES_JSON=$(jq -n \
+	--arg job_uuid "$JOB_UUID" \
+	--arg status_filter "$STATUS_FILTER" \
+	'{
+		":v0": { S: $job_uuid },
+		":v1": { S: $status_filter }
+	}')
+
+
+# echo the query string - this is just for debug
+echo "doing query >>aws dynamodb query<< with parameters: \
+--region $DYNAMODB_REGION
+--table-name $DYNAMODB_TABLE
+--index-name $JOB_UUID_INDEX
+--key-condition-expression $KEY_CONDITION_EXPRESSION
+--filter-expression $FILTER_EXPRESSION
+--projection-expression $PROJECTION_EXPRESSION
+--expression-attribute-names $EXPRESSION_ATTRIBUTE_NAMES_JSON
+--expression-attribute-values $EXPRESSION_ATTRIBUTE_VALUES_JSON"
+
+# call the query with aws dynamodb:
+RES=$(aws dynamodb query \
+	--region "$DYNAMODB_REGION" \
+	--table-name "$DYNAMODB_TABLE" \
+	--index-name "$JOB_UUID_INDEX" \
+	--key-condition-expression "$KEY_CONDITION_EXPRESSION" \
+	--filter-expression "$FILTER_EXPRESSION" \
+	--projection-expression "$PROJECTION_EXPRESSION" \
+	--expression-attribute-names "$EXPRESSION_ATTRIBUTE_NAMES_JSON" \
+	--expression-attribute-values "$EXPRESSION_ATTRIBUTE_VALUES_JSON")
+
+# we get back all the niftis - choose just the one according to this container
+NIFTI_UUID=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${NIFTI_UUID_ATTRIBUTE}.S")
+NIFTI_NAME=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${NAME_ATTRIBUTE}.S")
+NIFTI_PATH_CLEAN=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${PATH_CLEAN_ATTRIBUTE}.S")
+NIFTI_S3_PATH=$(echo $RES | jq -r ".Items[${AWS_BATCH_JOB_ARRAY_INDEX}].${S3_PATH_ATTRIBUTE}.S")
+SUBJECT_ID="${NIFTI_PATH_CLEAN}"
+
+# output the results - this is just for debug purposes
+echo "GOT DATA: "\
+	"NIFTI_UUID is: $NIFTI_UUID, "\
+	"NIFTI_NAME is: $NIFTI_NAME, "\
+	"NIFTI_PATH_CLEAN is: $NIFTI_PATH_CLEAN, "\
+	"NIFTI_S3_PATH is: $NIFTI_S3_PATH"
+echo "NOTE: set SUBJECT_ID variable to NIFTI_PATH_CLEAN, since it unambiguously identifies the subject!"

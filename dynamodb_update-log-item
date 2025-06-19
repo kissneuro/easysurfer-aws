@@ -1,0 +1,32 @@
+#!/bin/bash
+NIFTI_UUID=$1
+
+DYNAMODB_REGION=${ENV_REGION}
+NIFTI_TABLE='freesurfer-niftis'
+
+NIFTI_UUID_ATTRIBUTE='nifti_uuid'
+JOB_UUID_ATTRIBUTE='job_uuid'
+
+KEY_JSON=$(jq -n --arg nifti_uuid "$NIFTI_UUID" '{
+    nifti_uuid: {S: $nifti_uuid}
+}')
+
+LOG_MSG="[easysurfer] ${1}\n"
+VALUES_JSON=$(jq -n --arg log "${LOG_MSG}" '{ 
+    ":v1": {
+        L: [ {S: $log} ]
+    },
+    ":empty_list": {
+        L: []
+    }
+}')
+
+aws dynamodb update-item \
+        --region "$DYNAMODB_REGION" \
+        --table-name "$NIFTI_TABLE" \
+        --key "$KEY_JSON" \
+				--update-expression "SET #a1 = list_append(if_not_exists(#a1, :empty_list), :v1)" \
+        --expression-attribute-names '{"#a1": "logs"}' \
+        --expression-attribute-values "$VALUES_JSON" \
+        --return-values UPDATED_NEW
+echo "... aws dynamodb update-item finished"

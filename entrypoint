@@ -1,0 +1,55 @@
+#!/bin/bash
+echo
+echo ================================================================================ 
+echo "This is the ENTRYPOINT bash file $0"
+echo "This script needs the freesurfer-run-script to run it."
+echo Therefore, this script does the following things:
+echo 1. check if env variable FREESURFER_RUN_SCRIPT is set
+echo ... if not, set to default \"freesurfer-run\".
+echo 2. check if the file FREESURFER_RUN_SCRIPT exists.
+echo ... if not, try to fetch FETCH_BASE_URL/FREESURFER_RUN_SCRIPT using wget
+echo 3. make file executable
+echo 4. run it
+echo -------------------------------------------------------------------------------- 
+
+echo "FREESURFER_RUN_SCRIPT is: $FREESURFER_RUN_SCRIPT"
+echo "FETCH_BASE_URL is: $FETCH_BASE_URL"
+echo "--------------------------------------------------------------------------------"
+echo
+echo "check: running ls -lah"
+echo "-------------------------------"
+ls -lah
+echo "-------------------------------"
+
+if [ -z "$FREESURFER_RUN_SCRIPT" ]; then
+	FREESURFER_RUN_SCRIPT="freesurfer-run"
+	echo "FREESURFER_RUN_SCRIPT was not set, set to default: $FREESURFER_RUN_SCRIPT."
+fi
+
+if [ ! -f "$FREESURFER_RUN_SCRIPT" ]; then
+	echo "$FREESURFER_RUN_SCRIPT does not exist as a file, trying to fetch it..."
+	if [ -z "$FETCH_BASE_URL" ]; then
+		FETCH_BASE_URL="neurocalculator.de/aws_storage"
+		echo "FETCH_BASE_URL was not set, set to default $FETCH_BASE_URL"
+	fi
+	wget "${FETCH_BASE_URL}/${FREESURFER_RUN_SCRIPT}"
+	if [ -f "$FREESURFER_RUN_SCRIPT" ]; then
+		echo "... fetch successful."
+	else
+		echo "after fetch, $FREESURFER_RUN_SCRIPT still not found, exiting..."
+		exit
+	fi
+fi
+
+
+
+echo "making $FREESURFER_RUN_SCRIPT executable..."
+chmod +x "$FREESURFER_RUN_SCRIPT"
+
+echo "runnig >>./"$FREESURFER_RUN_SCRIPT"<< ..."
+./"${FREESURFER_RUN_SCRIPT}"
+
+echo ================================================================================ 
+echo "This is in bash after command ./"$FREESURFER_RUN_SCRIPT". Script obviously exited."
+echo "Nothing more to do, ENTRYPOINT $0 exiting too."
+exit
